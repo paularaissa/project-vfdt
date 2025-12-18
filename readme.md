@@ -16,11 +16,10 @@ The implementation combines [Flower](https://flower.dev/) for federated orchestr
 
 ## Requirements
 
-- Python 3.8+
-- `flower` (>= 1.5.0)
+- Python 3.13
+- `flower` (= 1.15.0)
 - `river`
-- `codecarbon`
-- NumPy, pandas, gRPC
+- NumPy, pandas
 
 ## Directory Structure
 
