@@ -96,7 +96,6 @@ python client_app/client_app.py 1
 **Option B: Batch Execution (Bash Script)**
 To launch all 10 clients sequentially in the background:
 ```bash
-export PYTHONPATH=$PYTHONPATH:.
 for i in {1..9}
 do
    echo "Starting client $i..."
