@@ -54,7 +54,7 @@ class FederatedHoeffdingTree(HoeffdingTreeClassifier):
         # 4) Updates leaf statistics
         leaf.learn_one(x, y, tree=self)
 
-        # 4.5) Stores the instance in the buffer for post-split reprocessing
+        # 4.1) Stores the instance in the buffer for post-split reprocessing
         self._instance_buffer.setdefault(uid, []).append((x, y, w))
 
         # 5) Checks if the node is active
@@ -70,7 +70,6 @@ class FederatedHoeffdingTree(HoeffdingTreeClassifier):
         last_attempt = getattr(leaf, "last_split_attempt_at", 0)
         if (weight_seen - last_attempt) < self.grace_period:
             return  # Grace period not yet reached
-
 
         # 8) Split suggestions
         split_criterion = self._new_split_criterion()
@@ -148,8 +147,142 @@ class FederatedHoeffdingTree(HoeffdingTreeClassifier):
         traverse(self._root)
         return leaves
 
-
     def apply_aggregated_split(self, decision: dict):
+        """
+        Applies the split from the server (Standard FL).
+        """
+        # 1. Extract data from the server decision.
+        feature   = decision.get("feature")
+        threshold = decision.get("threshold")
+        value     = decision.get("value")
+        path      = decision.get("path")
+        children_stats = decision.get("children_stats")
+
+        # Security validation
+        if feature is None or path is None:
+            print("⚠️ Invalid global split (missing feature or path). Ignoring.")
+            return False
+
+        # 2. Locate the target node (using the Path, which is universal)
+        target = self._find_node_by_path(self._root, path)
+
+        if target is None:
+            print(f"❌ CRITICAL ERROR: Could not locate node at path={path}. Trees out of sync.")
+            #self.debug_print_tree() # debug
+            return False
+
+        # If the node is no longer a leaf, it has already been split (avoids duplication).
+        if not getattr(target, "_is_leaf", True) and hasattr(target, "children"):
+            print(f"⚠️ O nó no path {path} já é um Branch. Split duplicado ignorado.")
+            self._pending_split = None
+            self._frozen = False
+            return
+
+        # 3. Ensure the local Splitter (Gaussian) is aware of the feature (Hack for River).
+        if hasattr(target, "splitter") and isinstance(target.splitter, GaussianSplitter):
+            fs = getattr(target.splitter, "_feature_stats", None)
+            if fs is not None and feature not in fs:
+                fs[feature] = stats.Var()
+
+        # 4. Create the new leaves.
+        left = self._new_leaf(initial_stats={}, parent=target)
+        right = self._new_leaf(initial_stats={}, parent=target)
+
+        # Ensure UUIDs
+        if not hasattr(left, 'uuid') or not left.uuid: left.uuid = str(uuid.uuid4())
+        if not hasattr(right, 'uuid') or not right.uuid: right.uuid = str(uuid.uuid4())
+
+        # =================================================================
+        # 5. STATISTICS INJECTION (STANDARD FL)
+        # =================================================================
+        # Here we inject the "global sum" from the server.
+        # Thus, the client that lacked data (pending_split=None) gains the knowledge
+        # of the entire federation.
+        if children_stats and len(children_stats) == 2:
+            # Left
+            left.stats = children_stats[0]
+            #left.total_weight = sum(left.stats.values())
+            left.last_split_attempt_at = left.total_weight
+
+            # Right
+            right.stats = children_stats[1]
+            #right.total_weight = sum(right.stats.values())
+            right.last_split_attempt_at = right.total_weight
+        else:
+            print("⚠️ Global stats empty. Leaves will be initialized empty (may cause training delay).")
+
+        # 6. Create the Branch (Numeric or Nominal) using SERVER data.
+        branch = None
+
+        # Attempts to retrieve split_test if available (useful for Nominals).
+        split_test_obj = None
+        if decision.get("split_test"):
+            try:
+                st_raw = decision["split_test"]
+                # Se vier base64 string
+                if isinstance(st_raw, str):
+                    split_test_obj = pickle.loads(base64.b64decode(st_raw))
+                else:
+                    split_test_obj = st_raw
+            except:
+                pass
+
+        if threshold is not None:
+            # Numeric Logic (uses the server's threshold)
+            branch = NumericBinaryBranch(
+                feature=feature,
+                threshold=threshold,
+                stats=copy.deepcopy(target.stats),
+                depth=target.depth,
+                left=left,
+                right=right,
+            )
+        else:
+            # Nominal Logic (uses the server's value or split_test)
+            branch = NominalBinaryBranch(
+                feature=feature,
+                value=value if value is not None else 0,
+                split_test=split_test_obj,
+                stats=copy.deepcopy(target.stats),
+                depth=target.depth,
+                left=left,
+                right=right,
+            )
+
+        # Maintains ID consistency
+        branch.uuid = getattr(target, "uuid", str(uuid.uuid4()))
+
+        # 7. Surgical Tree Replacement
+        if target is self._root:
+            self._root = branch
+        else:
+            success = self._replace_leaf_with_branch(self._root, target, branch)
+            if not success:
+                print("❌ Falha ao substituir folha na estrutura.")
+                return False
+
+        # 8. State Cleanup and Unlocking
+        # Regardless of whether we had a pending_split or not, we are now synchronized.
+        self._pending_split = None
+        self._frozen = False
+
+        # Clears local auxiliary counters
+        if hasattr(self, "_leaf_counters"):
+            old_uuid = getattr(target, "uuid", None)
+            if old_uuid and old_uuid in self._leaf_counters:
+                del self._leaf_counters[old_uuid]
+            self._leaf_counters[left.uuid] = 0
+            self._leaf_counters[right.uuid] = 0
+
+        # Reapply buffered instance (optional, but recommended)
+        if hasattr(self, "last_instance") and self.last_instance:
+            self.learn_one(*self.last_instance)
+
+        split_desc = f"{feature} {'≤ ' + str(threshold) if threshold is not None else '== ' + str(value)}"
+        print(f"✅ Global Split Applied (Standard FL): {split_desc}")
+        return True
+
+    def apply_aggregated_split_bkp(self, decision: dict):
         """Applies the split received from the server using path as a universal reference."""
 
         feature   = decision.get("feature")
@@ -231,6 +364,19 @@ class FederatedHoeffdingTree(HoeffdingTreeClassifier):
             # Creates two children
             left = self._new_leaf(initial_stats={}, parent=target)
             right = self._new_leaf(initial_stats={}, parent=target)
+
+            ### STANDARD FL CORRECTION: Injects "global wisdom" into the leaves
+            if children_stats and len(children_stats) == 2:
+                # Esquerda
+                left.stats = children_stats[0]
+                left.total_weight = sum(left.stats.values())
+                left.last_split_attempt_at = left.total_weight # Important: Resets counter to prevent attempting a split immediately.
+
+                # Direita
+                right.stats = children_stats[1]
+                right.total_weight = sum(right.stats.values())
+                right.last_split_attempt_at = right.total_weight
+            ###
 
             # Forces unique IDs if they do not exist
             for node in [left, right]:

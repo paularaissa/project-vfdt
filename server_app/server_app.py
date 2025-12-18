@@ -78,6 +78,15 @@ class StrategyVFDT(FedAvg):
         self.aggregated_accuracy = 0
         self.aggregated_f1 = 0
 
+        # Variáveis de controlo de paragem
+        self.stop_training = False
+
+
+        # Armazena métricas agregadas para log
+        self.agg_metrics = {
+            "accuracy": 0, "f1": 0, "kappa_plus": 0, "kappa_m": 0, "bal_acc": 0, "gmean": 0
+        }
+
     def __repr__(self) -> str:
         return "FederatedHoeffdingTreeStrategy"
 
@@ -91,8 +100,12 @@ class StrategyVFDT(FedAvg):
             "best_feature": best_feature,
             "gini_index": global_stats.get("gini_index"),
             "hoeffding_bound": global_stats.get("hoeffding_bound"),
-            "accuracy": accuracy,
-            "f1": f1,
+            "accuracy": self.agg_metrics["accuracy"],
+            "f1": self.agg_metrics["f1"],
+            "kappa_plus": self.agg_metrics["kappa_plus"],
+            "kappa_m": self.agg_metrics["kappa_m"],
+            "bal_acc": self.agg_metrics["bal_acc"],
+            "gmean": self.agg_metrics["gmean"],
             "num_clients": num_clients,
             "timestamp": datetime.now().isoformat(),
         }
@@ -104,6 +117,106 @@ class StrategyVFDT(FedAvg):
             writer.writerow(row)
 
     def aggregate_fit(self, server_round, results, failures):
+        """Aggregates client results and determines whether training should continue."""
+        print(f"📊 Round {server_round}: Receiving results from {len(results)} clients...")
+
+        if not results:
+            return None, {}
+
+        # Receives the data sent by the clients
+        client_tree_stats = []
+        for client, res in results:
+            try:
+                tree_stats_json = res.metrics.get("tree_stats", "[]")
+                tree_stats = json.loads(tree_stats_json)
+                if tree_stats:
+                    client_tree_stats.append(tree_stats)
+                    print(f"📥 Client {client.cid} sent statistics: {tree_stats}")
+            except json.JSONDecodeError:
+                print(f"⚠️ Error decoding tree_stats from client {client.cid}")
+
+        # Coleta e Agrega Métricas de Performance
+        metrics_to_agg = ["accuracy", "f1", "kappa_plus", "kappa_m", "bal_acc", "gmean"]
+        for m in metrics_to_agg:
+            vals = [res.metrics.get(m, 0.0) for _, res in results]
+            self.agg_metrics[m] = sum(vals) / len(vals) if vals else 0.0
+
+        print(f"📊 Aggregated Metrics: Acc={self.agg_metrics['accuracy']:.4f}, "
+              f"F1={self.agg_metrics['f1']:.4f}")
+
+        # Selects the best feature
+        best = None
+        if client_tree_stats:
+            if self.aggregation_strategy == "quorum":
+                best = self._aggregate_with_quorum(client_tree_stats)
+            elif self.aggregation_strategy == "best-merit":
+                best = self._aggregate_best_merit(client_tree_stats)
+            elif self.aggregation_strategy == "majority-vote":
+                best = self._aggregate_majority_vote(client_tree_stats)
+            else:
+                raise ValueError(f"Unknown aggregation strategy: {self.aggregation_strategy}")
+
+        if best:
+            print(f"🏆 Best global feature selected: {best['feature']} (gini index: {best['gini_index']:.6f})")
+            aggregated_children_stats = self._aggregate_children_stats(best["feature"], client_tree_stats)
+
+            self.global_split_info = {
+                "leaf_id": best["leaf_id"],
+                "path": best.get("path", []),
+                "feature": best["feature"],
+                "threshold": best["threshold"],
+                "gini_index": best["gini_index"],
+                "hoeffding_bound": best["hoeffding_bound"],
+                "stats": best["node_stats"],
+                "gain_global": best["gain_local"],
+                "split_test": best.get("split_test"),
+                "children_stats": aggregated_children_stats,
+            }
+
+            self.log_server_round(
+                round_num = server_round,
+                best_feature = best["feature"],
+                global_stats={
+                    "gini_index": best["gini_index"],
+                    "hoeffding_bound": best["hoeffding_bound"]
+                },
+                num_clients=len(results),
+                accuracy=self.agg_metrics["accuracy"],
+                f1=self.agg_metrics["f1"]
+            )
+        else:
+            print("⚠️ No split aggregated in this round.")
+            self.global_split_info = {}
+            self.log_server_round(
+                round_num=server_round,
+                best_feature=None,
+                global_stats={},
+                num_clients=len(results),
+                accuracy=self.agg_metrics["accuracy"],
+                f1=self.agg_metrics["f1"]
+            )
+
+        # --- [LOGICAL CORRECTION HERE] ---
+
+        # 1. Query: Count of ACTIVE clients (with data).
+        # Note: Using get(..., True) for safety; assumes active if a legacy client omits the flag.
+        active_clients_count = sum(1 for _, res in results if res.metrics.get("is_active", True))
+
+        print(f"🕵️  Status: {active_clients_count} clientes ativos / {len(results)} conectados.")
+
+        # 2. Decision
+        if active_clients_count > 0:
+            # If AT LEAST ONE is active, continue.
+            self.increase_num_rounds_by = 1
+            self.stop_training = False
+        else:
+            # If ALL are passive (is_active=False), terminate.
+            print("✅ All clients have exhausted their data.")
+            self.increase_num_rounds_by = 0
+            self.stop_training = True
+        return None, {}
+
+    def aggregate_fit_bkp(self, server_round, results, failures):
         """Aggregates client results and determines whether training should continue."""
         print(f"📊 Round {server_round}: Receiving results from {len(results)} clients...")
 
@@ -119,7 +232,6 @@ class StrategyVFDT(FedAvg):
             try:
                 tree_stats_json = res.metrics.get("tree_stats", "[]")  # Retrieving tree_stats from the client
                 tree_stats = json.loads(tree_stats_json)  # Converting JSON to dictionary
-
                 if tree_stats:
                     client_tree_stats.append(tree_stats)
                     print(f"📥 Client {client.cid} sent statistics: {tree_stats}")
@@ -127,6 +239,17 @@ class StrategyVFDT(FedAvg):
             except json.JSONDecodeError:
                 print(f"⚠️ Error decoding tree_stats from client {client.cid}")
 
+        # 2) Collect and Aggregate Performance Metrics
+        metrics_to_agg = ["accuracy", "f1", "kappa_plus", "kappa_m", "bal_acc", "gmean"]
+        for m in metrics_to_agg:
+            # Get value if exists, else 0.0.
+            vals = [res.metrics.get(m, 0.0) for _, res in results]
+            # Simple average
+            self.agg_metrics[m] = sum(vals) / len(vals) if vals else 0.0
+
+        print(f"📊 Aggregated Metrics: Acc={self.agg_metrics['accuracy']:.4f}, "
+              f"F1={self.agg_metrics['f1']:.4f}, K+={self.agg_metrics['kappa_plus']:.4f}, "
+              f"KM={self.agg_metrics['kappa_m']:.4f}")
 
         # Selects the best feature based on gain_local (gini - bound)
         best = None
@@ -141,7 +264,8 @@ class StrategyVFDT(FedAvg):
                 raise ValueError(f"Unknown aggregation strategy: {self.aggregation_strategy}")
         if best:
             print(f"🏆 Best global feature selected: {best['feature']} (gini index: {best['gini_index']:.6f})")
-
+            # STANDARD FL FIX: Sum global statistics.
+            aggregated_children_stats = self._aggregate_children_stats(best["feature"], client_tree_stats)
             # Finds the dictionary with the highest gain_local
             # best = max(
             #     client_tree_stats,
@@ -188,7 +312,8 @@ class StrategyVFDT(FedAvg):
                 "stats": best["node_stats"],
                 "gain_global": best["gain_local"],
                 "split_test": best.get("split_test"),
-                "children_stats": best.get("children_stats"),
+                #"children_stats": best.get("children_stats"),
+                "children_stats": aggregated_children_stats,
             }
 
             # Filters only the results that contain valid accuracy and F1 scores
@@ -250,6 +375,28 @@ class StrategyVFDT(FedAvg):
 
         best_group = max(candidates, key=lambda g: sum(s["gini_index"] for s in g))
         return max(best_group, key=lambda s: s["gini_index"])
+
+    def _aggregate_children_stats(self, feature, all_splits):
+        from collections import defaultdict
+        agg_left = defaultdict(float)
+        agg_right = defaultdict(float)
+
+        # In Standard FL, sum statistics from ALL clients agreeing with the winning feature.
+        contributors = [s for s in all_splits if s["feature"] == feature]
+
+        for s in contributors:
+            c_stats = s.get("children_stats")
+            # Secure deserialization
+            if isinstance(c_stats, str):
+                try: c_stats = json.loads(c_stats)
+                except: pass
+
+            if c_stats and isinstance(c_stats, list) and len(c_stats) == 2:
+                for cls, count in c_stats[0].items(): agg_left[cls] += count
+                for cls, count in c_stats[1].items(): agg_right[cls] += count
+
+        return [dict(agg_left), dict(agg_right)]
+
 
 
     def _aggregate_best_merit(self, splits):
@@ -327,6 +474,34 @@ class StrategyVFDT(FedAvg):
 
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
         """Configures the upcoming training rounds and sends the aggregation to clients"""
+
+        # <--- 3. Send stop signal. --->
+        config = {
+            "global_split_info": json.dumps(self.global_split_info),
+            "trigger_update": True,
+            # If `self.stop_training` is True, the client receives "True" and terminates.
+            "stop_training": "True" if self.stop_training else "False"
+        }
+
+        # Validation
+        required_fields = ["leaf_id", "feature", "threshold", "stats", "split_test"]
+        missing = [field for field in required_fields if field not in self.global_split_info]
+        # if missing: ... (optional warning logic)
+
+        # Samples the clients
+        sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
+        clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
+
+        local_grace = max(1, int(self.global_grace_period / max(1, len(clients))))
+        config["local_grace_period"] = local_grace
+
+        fit_ins = FitIns(parameters, config)
+        self.global_split_info = {}
+
+        return [(client, fit_ins) for client in clients]
+
+    def configure_fit_bkp(self, server_round: int, parameters: Parameters, client_manager):
+        """Configures the upcoming training rounds and sends the aggregation to clients"""
         config = {
             "global_split_info": json.dumps(self.global_split_info),  # Sends the aggregated data
             "trigger_update": True  # Forces the client to perform an extra learn_one after the data stream ends
@@ -363,7 +538,7 @@ def main():
     print("🔄 Creating strategy...")
     n_clients = 10
     global_grace_period = 200
-    path_logs = f"logs/CIC_IOT/nodes/{n_clients}nodes/"
+    path_logs = f"logs_new/kdd99/nodes/{n_clients}nodes/"
     os.makedirs(path_logs, exist_ok=True)
     strategy = StrategyVFDT(min_available_clients=n_clients,
                             min_fit_clients=n_clients,

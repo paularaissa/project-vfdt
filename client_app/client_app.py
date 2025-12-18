@@ -19,6 +19,8 @@ import json
 import uuid
 import time
 
+from client_evaluation import *
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*DataFrame concatenation with empty.*")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
@@ -89,18 +91,24 @@ class FedVFDTClient(fl.client.NumPyClient):
 
         # Initializes the Hoeffding Tree Classifier model from River
         self.model = FederatedHoeffdingTree(#grace_period=67,
-                                            #grace_period=100,
-                                            # grace_period=40,
-                                            grace_period=20,
-                                            #grace_period=10,
+                                            # grace_period=100,
+                                            # grace_period=40, # 5 nodes
+                                             grace_period=20, # 10 nodes
+                                            #grace_period=10, # 20 nodes
                                             #grace_period=200,
                                             delta=1e-5,
                                             split_criterion="gini",
                                             #nominal_attributes=['protocol_type', 'service', 'flag']
                                             )
+
+        # Inicializa Métricas (Padrão + Customizadas)
         self.accuracy = metrics.Accuracy()
         self.f1 = metrics.MacroF1()
-        self.kappa = metrics.CohenKappa()
+        self.kappa_plus = KappaPlus()
+        self.kappa_m = KappaM()
+        self.bal_acc = BalancedAccuracyOnline()
+        self.gmean = GMeanOnline()
+
         self.grace_period = self.model.grace_period
         self.values_plt_all = []
         self.round = 1  # Control the number of rounds
@@ -115,7 +123,8 @@ class FedVFDTClient(fl.client.NumPyClient):
         os.makedirs(self.logs_path, exist_ok=True)
         self.log_file_name = logs_path / f"client_{client_id}.csv"
         self.log_file = open(self.log_file_name, mode="a", newline="")
-        fieldnames = ["instances", "round", "splits", "depth", "nodes", "leaves", "accuracy", "f1"]
+        fieldnames = ["instances", "round", "splits", "depth", "nodes", "leaves",
+                      "accuracy", "f1", "kappa_plus", "kappa_m", "bal_acc", "gmean"]
         self.log_writer = csv.DictWriter(self.log_file, fieldnames=fieldnames)
         # Writes header if the file is empty
         if self.log_file.tell() == 0:
@@ -130,6 +139,8 @@ class FedVFDTClient(fl.client.NumPyClient):
         self.n_seen_by_leaf = {}
         self.replay_buffer = []
         self.logs_all = []
+
+        self.dataset_exhausted = False
 
     def set_parameters(self, parameters):
         """Decides whether the client uses the aggregated model or keeps its own model."""
@@ -149,6 +160,17 @@ class FedVFDTClient(fl.client.NumPyClient):
                 print("⚠️ Keeping the previous model.")
         else:
             print("⚠️ No model received from the server. Keeping the current model.")
+
+    def _get_metrics_dict(self):
+        """Retorna dicionário com todas as métricas atuais."""
+        return {
+            "accuracy": self._safe_get(self.accuracy),
+            "f1": self._safe_get(self.f1),
+            "kappa_plus": self._safe_get(self.kappa_plus),
+            "kappa_m": self._safe_get(self.kappa_m),
+            "bal_acc": self._safe_get(self.bal_acc),
+            "gmean": self._safe_get(self.gmean),
+        }
 
     def _collect_branch_uuids(self, node):
         """Traverses the entire tree, assigns a UUID to each new Branch, and returns the set of UUIDs."""
@@ -180,6 +202,7 @@ class FedVFDTClient(fl.client.NumPyClient):
         """Reads the next row from the CSV and returns a dictionary of features (x) and the label (y)."""
         try:
             row = next(self.reader)
+            ## elec2
             # x = {
             #    "day": float(row["day"]),
             #    "period": float(row["period"]),
@@ -191,30 +214,76 @@ class FedVFDTClient(fl.client.NumPyClient):
             # }
             # y = row['class']
 
-            x = {
-                #"src_port": float(row["src_port"]),
-                #"dst_port": float(row["dst_port"]),
-                "ttl": float(row["ttl"]),
-                "tcp_window_size": float(row["tcp_window_size"]),
-                "eth_size": float(row["eth_size"]),
-                "payload_length": float(row["payload_length"]),
-                "l4_tcp": float(row["l4_tcp"]),
-                "l4_udp": float(row["l4_udp"]),
-                "inter_arrival_time": float(row["inter_arrival_time"]),
-                "jitter": float(row["jitter"]) if row["jitter"].strip() != "" else 0.0,
-                "stream_5_mean": float(row["stream_5_mean"]) if row["stream_5_mean"].strip() != "" else 0.0,
-                #"stream_5_var": float(row["stream_5_var"]),
-                #"stream_jitter_5_mean": float(row["stream_jitter_5_mean"]),
-                #"stream_jitter_5_var": float(row["stream_jitter_5_var"]),
-                #"src_ip_5_var": float(row["src_ip_5_var"]),
-                "payload_entropy": float(row["payload_entropy"]),
-                "dns_interval": float(row["dns_interval"]),
-                "dns_len_qry": float(row["dns_len_qry"]),
-                "handshake_cipher_suites_length": float(row["handshake_cipher_suites_length"]),
-                "handshake_extensions_length": float(row["handshake_extensions_length"]),
-            }
-            y = row['Label']
+            ## CIC-IOT
+            # x = {
+            #     #"src_port": float(row["src_port"]),
+            #     #"dst_port": float(row["dst_port"]),
+            #     "ttl": float(row["ttl"]),
+            #     "tcp_window_size": float(row["tcp_window_size"]),
+            #     "eth_size": float(row["eth_size"]),
+            #     "payload_length": float(row["payload_length"]),
+            #     "l4_tcp": float(row["l4_tcp"]),
+            #     "l4_udp": float(row["l4_udp"]),
+            #     "inter_arrival_time": float(row["inter_arrival_time"]),
+            #     "jitter": float(row["jitter"]) if row["jitter"].strip() != "" else 0.0,
+            #     "stream_5_mean": float(row["stream_5_mean"]) if row["stream_5_mean"].strip() != "" else 0.0,
+            #     #"stream_5_var": float(row["stream_5_var"]),
+            #     #"stream_jitter_5_mean": float(row["stream_jitter_5_mean"]),
+            #     #"stream_jitter_5_var": float(row["stream_jitter_5_var"]),
+            #     #"src_ip_5_var": float(row["src_ip_5_var"]),
+            #     "payload_entropy": float(row["payload_entropy"]),
+            #     "dns_interval": float(row["dns_interval"]),
+            #     "dns_len_qry": float(row["dns_len_qry"]),
+            #     "handshake_cipher_suites_length": float(row["handshake_cipher_suites_length"]),
+            #     "handshake_extensions_length": float(row["handshake_extensions_length"]),
+            # }
+            # y = row['Label']
 
+            ## kdd99
+            x = {
+                "duration": float(row['duration']),
+                # "protocol_type": str(row['protocol_type']),
+                # "service": str(row['service']),
+                # "flag": str(row['flag']),
+                "src_bytes": int(row['src_bytes']),
+                "dst_bytes": int(row['dst_bytes']),
+                "land": int(row['land']),
+                "wrong_fragment": int(row['wrong_fragment']),
+                "urgent": int(row['urgent']),
+                "hot": int(row['hot']),
+                "num_failed_logins": int(row['num_failed_logins']),
+                "logged_in": int(row['logged_in']),
+                "num_compromised": int(row['num_compromised']),
+                "root_shell": int(row['root_shell']),
+                "su_attempted": int(row['su_attempted']),
+                "num_root": int(row['num_root']),
+                "num_file_creations": int(row['num_file_creations']),
+                "num_shells": int(row['num_shells']),
+                "num_access_files": int(row['num_access_files']),
+                "num_outbound_cmds": int(row['num_outbound_cmds']),
+                "is_host_login": int(row['is_host_login']),
+                "is_guest_login": int(row['is_guest_login']),
+                "count": int(row['count']),
+                "srv_count": int(row['srv_count']),
+                "serror_rate": float(row['serror_rate']),
+                "srv_serror_rate": float(row['srv_serror_rate']),
+                "rerror_rate": float(row['rerror_rate']),
+                "srv_rerror_rate": float(row['srv_rerror_rate']),
+                "same_srv_rate": float(row['same_srv_rate']),
+                "diff_srv_rate": float(row['diff_srv_rate']),
+                "srv_diff_host_rate": float(row['srv_diff_host_rate']),
+                "dst_host_count": int(row['dst_host_count']),
+                "dst_host_srv_count": int(row['dst_host_srv_count']),
+                "dst_host_same_srv_rate": float(row['dst_host_same_srv_rate']),
+                "dst_host_diff_srv_rate": float(row['dst_host_diff_srv_rate']),
+                "dst_host_same_src_port_rate": float(row['dst_host_same_src_port_rate']),
+                "dst_host_srv_diff_host_rate": float(row['dst_host_srv_diff_host_rate']),
+                "dst_host_serror_rate": float(row['dst_host_serror_rate']),
+                "dst_host_srv_serror_rate": float(row['dst_host_srv_serror_rate']),
+                "dst_host_rerror_rate": float(row['dst_host_rerror_rate']),
+                "dst_host_srv_rerror_rate": float(row['dst_host_srv_rerror_rate']),
+            }
+            y = row['label']
             return x, y
         except StopIteration:
             return None, None
@@ -233,6 +302,17 @@ class FedVFDTClient(fl.client.NumPyClient):
         except Exception as e:
             print(f"⚠️ Error computing metric {metric}: {e}")
             return float("nan")
+
+    def _safe_get(self, metric):
+        """Helper para pegar valor de métrica com tratamento de erro/NaN."""
+        try:
+            val = metric.get()
+            # Verifica se é float e se é válido (não é NaN nem Inf)
+            if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+                return 0.0
+            return val
+        except Exception:
+            return 0.0
 
     def extract_tree_info(self):
         """Retrieves information from the node that was recently split in the decision tree."""
@@ -508,8 +588,231 @@ class FedVFDTClient(fl.client.NumPyClient):
         return paths
 
 
-    # CSVClient.fit
     def fit(self, parameters: NDArrays, config):
+        """
+        Main training method.
+        Modified to support 'Passive Mode': The client remains active even after running out
+        of data, to ensure it receives the last splits from the server.
+        """
+
+        # ----------------------------------------------------------------------
+        # 1. STOPPING CHECK (Sent by the Server)
+        # ----------------------------------------------------------------------
+        # If the server sends a stop signal, terminate execution.
+        if config.get("stop_training") == "True":
+            print(f"🛑 [Client {self.client_id}] Server sent STOP signal. Shutting down.")
+            # Optional: Print final tree for debugging.
+            # self.model.debug_print_tree()
+            return parameters, 0, {
+                "accuracy": self.safe_metric_get(self.accuracy),
+                "f1": self.safe_metric_get(self.f1),
+                "continue_training": False  # <--- ACTUAL CLIENT TERMINATION
+            }
+
+        # ----------------------------------------------------------------------
+        # 2. MODEL UPDATE
+        # ----------------------------------------------------------------------
+        if parameters and len(parameters) > 0:
+            try:
+                agg = pickle.loads(parameters[0])
+                if isinstance(agg, FederatedHoeffdingTree):
+                    self.model = agg
+                    self.model._frozen = False
+                    print("📥 Aggregated model received.")
+            except Exception as e:
+                print(f"❌ Error deserializing aggregated model: {e}")
+
+        # ----------------------------------------------------------------------
+        # 3. APPLICATION OF GLOBAL SPLITS
+        # ----------------------------------------------------------------------
+        if "global_split_info" in config:
+            try:
+                info = json.loads(config["global_split_info"])
+                required_keys = ["feature", "threshold", "path", "split_test"]
+
+                # Only apply if the dictionary is not empty and contains the required keys.
+                if info and all(k in info for k in required_keys):
+                    print(f"📦 [Client {self.client_id}] Applying global split from server.")
+
+                    success = self.model.apply_aggregated_split(info)
+
+                    if success:
+                        print(f"✅ Split applied successfully.")
+                        # Reaplica última instância para garantir consistência nas folhas novas
+                        if self.model.last_instance:
+                            self.model.learn_one(*self.model.last_instance)
+                        # Reset active leaf counters.
+                        for leaf in self.model._get_all_active_leaves():
+                            leaf.last_split_attempt_at = getattr(leaf, "total_weight", 0.0)
+                    else:
+                        print(f"⚠️ Failed to apply split (path mismatch?). Unfreezing model.")
+
+                    # Unfreeze to continue, regardless of success.
+                    self.model._frozen = False
+                    self.model._pending_split = None
+            except json.JSONDecodeError:
+                pass # Ignore empty or invalid JSON.
+
+        # ----------------------------------------------------------------------
+        # 4. PASSIVE MODE (Data exhaustion in prior rounds)
+        # ----------------------------------------------------------------------
+        if self.dataset_exhausted:
+            # [FIX] Force logging to verify receipt of the final split
+            # Even without new data, the tree structure has changed
+            try:
+                self.log_writer.writerow({
+                    "instances": self.count_instances,
+                    "round": self.round,
+                    "splits": self.model.n_branches,
+                    "depth": self.model.depth(),
+                    "nodes": self.model.n_nodes,
+                    "leaves": self.model.n_leaves,
+                    "accuracy": self.safe_metric_get(self.accuracy),
+                    "f1": self.safe_metric_get(self.f1),
+                    "kappa_plus": self._safe_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
+                })
+                self.log_file.flush()
+            except Exception as e:
+                print(f"⚠️ Error writing passive mode log: {e}")
+
+            # Client does not train but reports metrics and remains active awaiting splits.
+            #print(f"💤 [Client {self.client_id}] Passive Mode: Waiting for server updates.")
+            return parameters, 0, {
+                "accuracy": self.safe_metric_get(self.accuracy),
+                "f1": self.safe_metric_get(self.f1),
+                "kappa_plus": self._safe_get(self.kappa_plus),
+                "kappa_m": self._safe_get(self.kappa_m),
+                "bal_acc": self._safe_get(self.bal_acc),
+                "gmean": self._safe_get(self.gmean),
+                "is_active": False,
+                "continue_training": True
+            }
+
+        # ----------------------------------------------------------------------
+        # 5. FREEZE CHECK (Pending Split)
+        # ----------------------------------------------------------------------
+        # If waiting for the server to decide on our split.
+        if getattr(self.model, "_frozen", False):
+            print("⏸ Learning paused — waiting for global split decision.")
+
+            # If a split is pending, resend to ensure server receipt.
+            if self.model._pending_split is not None:
+                stats_msg = json.dumps(self.send_tree_stats())
+                return parameters, 1, {
+                    "tree_stats": stats_msg,
+                    "accuracy": self.safe_metric_get(self.accuracy),
+                    "f1": self.safe_metric_get(self.f1),
+                    "kappa_plus": self._safe_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
+                    "continue_training": True,
+                }
+            # If frozen but no pending split (e.g., post-error), continue.
+            return parameters, 0, {"continue_training": True}
+
+        # ----------------------------------------------------------------------
+        # 6. TRAINING LOOP (Data Loading)
+        # ----------------------------------------------------------------------
+        while True:
+            x, y = self.read_next_value()
+
+            # --- DATA EXHAUSTION DETECTED ---
+            if x is None:
+                print(f"🏁 [Client {self.client_id}] End of dataset reached. Entering PASSIVE MODE.")
+                self.dataset_exhausted = True
+
+                # Log total time (only once).
+                end_time = time.time()
+                total_time = round(end_time - self.start_time, 4)
+                try:
+                    with open(f"{self.logs_path}/client_{self.client_id}_tempo.csv", mode="w", newline="") as tf:
+                        writer = csv.writer(tf)
+                        writer.writerow(["total_time_seconds"])
+                        writer.writerow([total_time])
+                except Exception as e:
+                    print(f"⚠️ Error logging time: {e}")
+
+                # Print final local tree.
+                # self.model.debug_print_tree()
+
+                # CRITICAL RETURN: continue_training = TRUE
+                return parameters, 0, {
+                    "accuracy": self.safe_metric_get(self.accuracy),
+                    "f1":       self.safe_metric_get(self.f1),
+                    "kappa_plus": self._safe_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
+                    "is_active": False,
+                    "continue_training": True,
+                }
+
+            # --- STANDARD TRAINING ---
+            self.last_instance = (x, y)
+            self.model.last_instance = self.last_instance
+
+            # 1. Predict
+            y_pred = self.model.predict_one(x)
+
+            # 2. Learn
+            self.model.learn_one(x, y)
+
+            # 3. Update Metrics
+            self.accuracy.update(y, y_pred)
+            self.f1.update(y, y_pred)
+            self.kappa_plus.update(y, y_pred)
+            self.kappa_m.update(y, y_pred)
+            self.bal_acc.update(y, y_pred)
+            self.gmean.update(y, y_pred)
+
+            # 4. Log CSV (Per instance)
+            self.log_writer.writerow({
+                "instances": self.count_instances,
+                "round": self.round,
+                "splits": self.model.n_branches,
+                "depth": self.model.depth(),
+                "nodes": self.model.n_nodes,
+                "leaves": self.model.n_leaves,
+                "accuracy": self.safe_metric_get(self.accuracy),
+                "f1": self.safe_metric_get(self.f1),
+                "kappa_plus": self._safe_get(self.kappa_plus),
+                "kappa_m": self._safe_get(self.kappa_m),
+                "bal_acc": self._safe_get(self.bal_acc),
+                "gmean": self._safe_get(self.gmean),
+            })
+            # Periodic flush to avoid I/O overhead (optional, every X lines).
+            self.log_file.flush()
+            self.count_instances += 1
+
+            # 5. Local split detected?
+            if self.model._pending_split is not None:
+                self.model._frozen = True
+                self.frozen_since_round = self.round
+
+                stats_msg = json.dumps(self.send_tree_stats())
+                print(f"📤 [Client {self.client_id}] Sending split proposal (Round {self.round}).")
+
+                self.round += 1
+
+                # Return split request to the server.
+                return parameters, 1, {
+                    "tree_stats": stats_msg,
+                    "accuracy": self.safe_metric_get(self.accuracy),
+                    "f1": self.safe_metric_get(self.f1),
+                    "kappa_plus": self.safe_metric_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
+                    "continue_training": True,
+                    "is_active": True,
+                }
+
+    # CSVClient.fit
+    def fit_bkp(self, parameters: NDArrays, config):
         # 0) Always print the tree before anything else
         #self.model.debug_print_tree()
 
@@ -532,12 +835,21 @@ class FedVFDTClient(fl.client.NumPyClient):
             required_keys = ["feature", "threshold", "path", "split_test"]
             if all(k in info for k in required_keys):
                 print("📦 Applying global split from the server.")
-                self.model.apply_aggregated_split(info)
+                #self.model.apply_aggregated_split(info)
                 success = self.model.apply_aggregated_split(info)
                 if success:
                     print(f"✅ [Client {self.client_id}] Split applied successfully.")
+                    # Reaplica última instância real
+                    if self.model.last_instance:
+                        self.model.learn_one(*self.model.last_instance)
+                    # Atualiza last_split_attempt_at
+                    for leaf in self.model._get_all_active_leaves():
+                        leaf.last_split_attempt_at = getattr(leaf, "total_weight", 0.0)
                 else:
                     print(f"❌ [Client {self.client_id}] Failed to apply split — path not found.")
+                    # Se falhou, força descongelamento para não travar o cliente
+                    self.model._frozen = False
+                    self.model._pending_split = None
 
     # self.redistribute_buffer_after_split(
                 #     split_path=info.get("path"),
@@ -593,6 +905,10 @@ class FedVFDTClient(fl.client.NumPyClient):
                     "tree_stats": stats_msg,
                     "accuracy": self.safe_metric_get(self.accuracy),
                     "f1": self.safe_metric_get(self.f1),
+                    "kappa_plus": self._safe_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
                     "continue_training": True,
                 }
             return parameters, 0, {"continue_training": True}
@@ -611,9 +927,14 @@ class FedVFDTClient(fl.client.NumPyClient):
                     writer.writerow([total_time])
                 self.log_file.close()
                 self.model.debug_print_tree()
+                metrics_dict = self._get_metrics_dict()
                 return parameters, 1, {
                     "accuracy": self.safe_metric_get(self.accuracy),
                     "f1":       self.safe_metric_get(self.f1),
+                    "kappa_plus": self._safe_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
                     "continue_training": False,
                 }
             #self.replay_buffer.append((x, y))
@@ -623,6 +944,10 @@ class FedVFDTClient(fl.client.NumPyClient):
             self.model.learn_one(x, y)
             self.accuracy.update(y, y_pred)
             self.f1.update(y, y_pred)
+            self.kappa_plus.update(y, y_pred)
+            self.kappa_m.update(y, y_pred)
+            self.bal_acc.update(y, y_pred)
+            self.gmean.update(y, y_pred)
 
             # Current instance log
             self.log_writer.writerow({
@@ -634,6 +959,10 @@ class FedVFDTClient(fl.client.NumPyClient):
                 "leaves": self.model.n_leaves,
                 "accuracy": self.safe_metric_get(self.accuracy),
                 "f1": self.safe_metric_get(self.f1),
+                "kappa_plus": self._safe_get(self.kappa_plus),
+                "kappa_m": self._safe_get(self.kappa_m),
+                "bal_acc": self._safe_get(self.bal_acc),
+                "gmean": self._safe_get(self.gmean),
             })
             self.log_file.flush()
             self.count_instances += 1
@@ -652,6 +981,10 @@ class FedVFDTClient(fl.client.NumPyClient):
                     "tree_stats": stats_msg,
                     "accuracy": self.safe_metric_get(self.accuracy),
                     "f1": self.safe_metric_get(self.f1),
+                    "kappa_plus": self.safe_metric_get(self.kappa_plus),
+                    "kappa_m": self._safe_get(self.kappa_m),
+                    "bal_acc": self._safe_get(self.bal_acc),
+                    "gmean": self._safe_get(self.gmean),
                     "continue_training": True,
                 }
 
@@ -660,9 +993,9 @@ from pathlib import Path
 def start_client(client_id):
     """Starts a Flower client and captures connection errors."""
     n_clients = 10
-    abs_path = Path("CIC_IOT") / "nodes" / f"{n_clients}nodes"
-    file_path = abs_path / f"client_{client_id}.csv"
-    path_logs = Path("logs") / abs_path
+    abs_path = Path("kdd99") / "nodes" / f"{n_clients}nodes"
+    file_path = abs_path / f"client_{client_id}_dataset.csv"
+    path_logs = Path("logs_new") / abs_path
     os.makedirs(path_logs, exist_ok=True)
     client = FedVFDTClient(file_path, path_logs, client_id)
     MAX_RETRIES = 1
