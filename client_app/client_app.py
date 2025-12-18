@@ -729,7 +729,7 @@ class FedVFDTClient(fl.client.NumPyClient):
                 end_time = time.time()
                 total_time = round(end_time - self.start_time, 4)
                 try:
-                    with open(f"{self.logs_path}/client_{self.client_id}_tempo.csv", mode="w", newline="") as tf:
+                    with open(f"{self.logs_path}/client_{self.client_id}_time.csv", mode="w", newline="") as tf:
                         writer = csv.writer(tf)
                         writer.writerow(["total_time_seconds"])
                         writer.writerow([total_time])
@@ -921,7 +921,7 @@ class FedVFDTClient(fl.client.NumPyClient):
                 total_time = round(end_time - self.start_time, 4)
 
                 # Saves total execution time in a separate file
-                with open(f"{self.logs_path}/client_{self.client_id}_tempo.csv", mode="w", newline="") as tf:
+                with open(f"{self.logs_path}/client_{self.client_id}_time.csv", mode="w", newline="") as tf:
                     writer = csv.writer(tf)
                     writer.writerow(["total_time_seconds"])
                     writer.writerow([total_time])
@@ -995,7 +995,7 @@ def start_client(client_id):
     n_clients = 10
     abs_path = Path("kdd99") / "nodes" / f"{n_clients}nodes"
     file_path = abs_path / f"client_{client_id}_dataset.csv"
-    path_logs = Path("logs_new") / abs_path
+    path_logs = Path("logs") / abs_path
     os.makedirs(path_logs, exist_ok=True)
     client = FedVFDTClient(file_path, path_logs, client_id)
     MAX_RETRIES = 1

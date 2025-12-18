@@ -538,7 +538,7 @@ def main():
     print("🔄 Creating strategy...")
     n_clients = 10
     global_grace_period = 200
-    path_logs = f"logs_new/kdd99/nodes/{n_clients}nodes/"
+    path_logs = f"logs/kdd99/nodes/{n_clients}nodes/"
     os.makedirs(path_logs, exist_ok=True)
     strategy = StrategyVFDT(min_available_clients=n_clients,
                             min_fit_clients=n_clients,

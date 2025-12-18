@@ -40,7 +40,7 @@ project-vfdt/
 │           ├── client_0_dataset.csv
 │           ├── client_1_dataset.csv
 │           └── ...
-├── logs_new/                # Output folder for logs/metrics
+├── logs/                # Output folder for logs/metrics
 ├── requirements.txt         # Project dependencies
 └── README.md
 ```
@@ -77,7 +77,7 @@ abs_path = Path("your/custom/path") / "nodes" / f"{n_clients}nodes"
 The experiment requires the server to be running before any clients can connect.
 
 ### 1. Starting the Server
-Open a terminal in the project root directory and execute the following command. The `PYTHONPATH` export is necessary for module resolution.
+Open a terminal in the project root directory and execute the following command.
 
 ```bash
 python server_app/server_app.py
@@ -129,7 +129,7 @@ Key parameters in `FedVFDTClient`:
 
 ## Logs & Results
 
-Metrics are recorded in the `logs_new/` directory:
+Metrics are recorded in the `logs/` directory:
 - **`server_log.csv`**: Global metrics (Accuracy, F1, Kappa, splits).
 - **`client_{id}.csv`**: Local metrics per instance.
-- **`client_{id}_tempo.csv`**: Total execution time per client.
+- **`client_{id}_time.csv`**: Total execution time per client.
