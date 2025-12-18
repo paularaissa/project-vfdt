@@ -1,0 +1,7 @@
+flwr>=1.5.0
+river
+numpy
+codecarbon
+grpcio
+protobuf
+pandas
