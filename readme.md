@@ -16,7 +16,7 @@ The implementation combines [Flower](https://flower.dev/) for federated orchestr
 
 ## Requirements
 
-- Python 3.13
+- Python 3.11
 - `flower` (= 1.15.0)
 - `river`
 - NumPy, pandas
